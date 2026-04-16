@@ -1,0 +1,413 @@
+// @version=6
+// ============================================================================
+// The Seven Experts — Confluence Panel & Next-Candle Bias  (v2.1)
+// Encodes the multi-expert panel logic into three on-chart tables:
+//   Top-right     · CURRENT CANDLE  — stage, archetype, confluence, components
+//   Bottom-right  · NEXT CANDLE     — bias, confidence, ATR range, verdict
+//   Middle-right  · IN-SAMPLE STATS — hit rates on the loaded chart
+// Closed-bar signals (non-repainting). Tables render only on the last bar.
+// ============================================================================
+
+indicator("Seven Experts — Confluence Panel", shorttitle="7XP", overlay=true, max_bars_back=1000, max_labels_count=50)
+
+// ─────────────────────────── INPUTS ─────────────────────────────────────────
+grpR  = "Market Bias Ribbon"
+haLen   = input.int(100, "HA smoothing length",     minval=2, group=grpR)
+haLen2  = input.int(100, "Ribbon smoothing length", minval=2, group=grpR)
+oscLen  = input.int(7,   "Oscillator length",       minval=1, group=grpR)
+
+grpB  = "B-Xtrender Momentum"
+bxFast  = input.int(5,   "Fast EMA",    minval=1, group=grpB)
+bxSlow  = input.int(20,  "Slow EMA",    minval=1, group=grpB)
+bxRsi   = input.int(15,  "RSI length",  minval=1, group=grpB)
+bxSig   = input.int(5,   "Signal EMA",  minval=1, group=grpB)
+
+grpS  = "Structure & Range"
+swingN  = input.int(20,  "Swing lookback (bars)",     minval=5, group=grpS)
+atrLen  = input.int(14,  "ATR length",                minval=1, group=grpS)
+atrMult = input.float(1.0, "Expected-range ATR×",     step=0.1, group=grpS)
+extK    = input.float(2.0, "Overextension ATR×",      step=0.1, group=grpS)
+tolATR  = input.float(0.5, "Archetype tolerance ATR×", step=0.1, group=grpS)
+
+grpUI = "UI"
+showT1  = input.bool(true, "Show Previous-Candle table", group=grpUI)
+showT2  = input.bool(true, "Show Current-Candle table",  group=grpUI)
+showT3  = input.bool(true, "Show Next-Candle table",     group=grpUI)
+txtSize = input.string("small", "Table text size", options=["tiny","small","normal","large"], group=grpUI)
+
+grpL  = "History Export"
+logOn   = input.bool(false, "Log CSV rows to Pine Logs", group=grpL, tooltip="Emits one row per closed bar. Open Pine Logs, copy, save as CSV.")
+logHdr  = input.bool(true,  "Include header row",         group=grpL)
+
+// ─────────────────────────── MARKET BIAS RIBBON ─────────────────────────────
+o_ema = ta.ema(open,  haLen)
+c_ema = ta.ema(close, haLen)
+h_ema = ta.ema(high,  haLen)
+l_ema = ta.ema(low,   haLen)
+
+haclose = (o_ema + h_ema + l_ema + c_ema) / 4.0
+var float haopen = na
+haopen := na(haopen[1]) ? (o_ema + c_ema) / 2.0 : (nz(haopen[1]) + nz(haclose[1])) / 2.0
+hahigh = math.max(h_ema, math.max(haopen, haclose))
+halow  = math.min(l_ema, math.min(haopen, haclose))
+
+o2 = ta.ema(haopen,  haLen2)
+c2 = ta.ema(haclose, haLen2)
+h2 = ta.ema(hahigh,  haLen2)
+l2 = ta.ema(halow,   haLen2)
+
+oscBias   = 100.0 * (c2 - o2)
+oscSmooth = ta.sma(oscBias, oscLen)
+
+ribbonMid = (h2 + l2) / 2.0
+ribbonUp  = h2
+ribbonDn  = l2
+
+bullBias   = oscBias > 0
+strongBull = bullBias     and oscBias >= oscSmooth
+strongBear = not bullBias and oscBias <= oscSmooth
+atr        = ta.atr(atrLen)
+ribbonFlat = (ribbonUp - ribbonDn) < atr * 0.4
+
+ribbonColor = strongBull ? color.new(color.green, 60) : bullBias ? color.new(color.green, 80) : strongBear ? color.new(color.red, 60) : color.new(color.red, 80)
+
+plot(ribbonUp, "Ribbon Up", color=ribbonColor, linewidth=2)
+plot(ribbonDn, "Ribbon Dn", color=ribbonColor, linewidth=2)
+fill(plot(ribbonUp, display=display.none), plot(ribbonDn, display=display.none), color=ribbonColor, title="Ribbon fill")
+
+// ─────────────────────────── B-XTRENDER ─────────────────────────────────────
+bxRaw  = ta.rsi(ta.ema(close, bxFast) - ta.ema(close, bxSlow), bxRsi) - 50.0
+bxSigL = ta.ema(bxRaw, bxSig)
+
+// ─────────────────────────── SWING STRUCTURE ────────────────────────────────
+hiN    = ta.highest(high, swingN)
+loN    = ta.lowest(low,   swingN)
+hiPrev = ta.highest(high[swingN], swingN)
+loPrev = ta.lowest(low[swingN],   swingN)
+isHH   = hiN > hiPrev
+isHL   = loN > loPrev
+isLH   = hiN < hiPrev
+isLL   = loN < loPrev
+structScore = (isHH and isHL) ? 1 : (isLH and isLL) ? -1 : 0
+
+// ─────────────────────────── VOLUME ─────────────────────────────────────────
+volSma    = ta.sma(volume, 20)
+volExpand = volume > volSma * 1.25
+bullBar   = close > open
+volScore  = volExpand ? (bullBar ? 1 : -1) : 0
+
+// ─────────────────────────── CONFLUENCE SCORE  (−9 … +9) ────────────────────
+ribbonScore = strongBull ? 2 : bullBias ? 1 : strongBear ? -2 : ribbonFlat ? 0 : -1
+priceVsRibbon = close > ribbonUp ? 1 : close < ribbonDn ? -1 : 0
+bxSign  = bxRaw > 0 ? 1 : bxRaw < 0 ? -1 : 0
+bxSlope = bxRaw > bxRaw[1] and bxRaw > bxSigL ? 1 : bxRaw < bxRaw[1] and bxRaw < bxSigL ? -1 : 0
+
+confluence = ribbonScore + priceVsRibbon + bxSign + bxSlope + structScore + volScore
+
+// ─────────────────────────── STAGE DETECTION ────────────────────────────────
+ribbonSlopeUp   = ribbonMid > ribbonMid[3]
+ribbonSlopeDn   = ribbonMid < ribbonMid[3]
+ribbonJustGreen = bullBias     and not bullBias[5]
+ribbonJustRed   = not bullBias and bullBias[5]
+
+stage = bullBias and ribbonSlopeUp and close > ribbonUp ? 2 : not bullBias and ribbonSlopeDn and close < ribbonDn ? 4 : ribbonJustGreen or (ribbonFlat and close >= ribbonMid) ? 1 : ribbonJustRed or (ribbonFlat and close < ribbonMid) ? 3 : 0
+
+stageName  = stage == 1 ? "Stage 1 · Base" : stage == 2 ? "Stage 2 · Uptrend" : stage == 3 ? "Stage 3 · Top" : stage == 4 ? "Stage 4 · Downtrend" : "Transition"
+stageColor = stage == 2 ? color.new(color.green, 20) : stage == 4 ? color.new(color.red, 20) : stage == 1 ? color.new(color.teal, 30) : stage == 3 ? color.new(color.orange, 30) : color.new(color.gray, 40)
+
+// ─────────────────────────── ARCHETYPE DETECTION ────────────────────────────
+pullbackZone = low <= ribbonUp + atr * tolATR or low[1] <= ribbonUp[1] + atr * tolATR
+distFromMid  = (close - ribbonMid) / atr
+
+isBreakout = ribbonJustGreen and confluence >= 3 and close > ribbonUp
+isPullback = stage == 2 and confluence >= 4 and bxRaw > bxRaw[1] and pullbackZone
+isBounce   = stage == 4 and bxRaw > bxRaw[1] and bxRaw > bxSigL and confluence >= -1
+isRollover = (stage == 3 or ribbonJustRed) and confluence <= -3
+isExhaust  = math.abs(distFromMid) > extK and math.sign(distFromMid) == math.sign(bxRaw) and math.abs(bxRaw) > 40
+
+archetypeId  = isBreakout ? 1 : isPullback ? 2 : isBounce ? 3 : isRollover ? 4 : isExhaust ? 5 : 0
+archetypeTxt = archetypeId == 1 ? "B · Stage 1→2 breakout" : archetypeId == 2 ? "A · Stage 2 pullback" : archetypeId == 3 ? "C · Stage 4 bounce (counter)" : archetypeId == 4 ? "D · Distribution / rollover" : archetypeId == 5 ? "E · Overextension" : "—"
+archetypeBias = archetypeId == 1 ? 1 : archetypeId == 2 ? 1 : archetypeId == 3 ? 0 : archetypeId == 4 ? -1 : archetypeId == 5 ? (distFromMid > 0 ? -1 : 1) : 0
+
+// ─────────────────────────── NEXT-CANDLE BIAS ───────────────────────────────
+dirBias    = confluence >= 3 ? 1 : confluence <= -3 ? -1 : 0
+confidence = math.abs(confluence) >= 7 ? "High" : math.abs(confluence) >= 4 ? "Medium" : "Low"
+expHigh    = close + atr * atrMult
+expLow     = close - atr * atrMult
+invalid    = dirBias == 1 ? loN : dirBias == -1 ? hiN : na
+verdictTxt = dirBias == 1 ? "LONG bias · buy dips above invalidation" : dirBias == -1 ? "SHORT bias · sell rallies below invalidation" : "NEUTRAL · stand aside"
+arrow      = dirBias == 1 ? "▲" : dirBias == -1 ? "▼" : "→"
+
+f_fmt(float v) => na(v) ? "—" : str.tostring(v, format.mintick)
+
+// ─────────────────────────── FORMATTING HELPERS ─────────────────────────────
+bxSignTxt  = bxSign == 1 ? "Bullish (>0)" : bxSign == -1 ? "Bearish (<0)" : "Neutral"
+bxSlopeTxt = bxSlope == 1 ? "Rising" : bxSlope == -1 ? "Falling" : "Flat"
+structTxt  = structScore == 1 ? "HH + HL" : structScore == -1 ? "LH + LL" : "Mixed"
+volTxt     = volScore == 1 ? "Bull + expansion" : volScore == -1 ? "Bear + expansion" : "Normal"
+ribbonTxt  = strongBull ? "Green · strong" : bullBias ? "Green · soft" : strongBear ? "Red · strong" : ribbonFlat ? "Flat" : "Red · soft"
+priceVsTxt = priceVsRibbon == 1 ? "Above" : priceVsRibbon == -1 ? "Below" : "Inside"
+dirTxt     = dirBias == 1 ? "UP" : dirBias == -1 ? "DOWN" : "SIDEWAYS"
+
+confColor = confluence >= 5 ? color.new(color.green, 0) : confluence >= 2 ? color.new(color.green, 40) : confluence <= -5 ? color.new(color.red, 0) : confluence <= -2 ? color.new(color.red, 40) : color.new(color.gray, 30)
+dirColor  = dirBias == 1 ? color.new(color.green, 0) : dirBias == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+tSize = txtSize == "tiny" ? size.tiny : txtSize == "small" ? size.small : txtSize == "large" ? size.large : size.normal
+
+white = color.white
+
+// ─────────────────────────── PREV/CURRENT COMPARE DATA ─────────────────────
+// Previous candle: prediction was made at close of t-2, evaluated against t-1.
+// Current candle : prediction was made at close of t-1, evaluated live at t.
+
+// --- Previous candle actuals (the bar that just closed, index [1]) ---
+prevActDirSign  = close[1] > close[2] ? 1 : close[1] < close[2] ? -1 : 0
+prevActDirTxt   = prevActDirSign == 1 ? "▲ UP" : prevActDirSign == -1 ? "▼ DOWN" : "→ FLAT"
+prevActDirColor = prevActDirSign == 1 ? color.new(color.green, 0) : prevActDirSign == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+prevPredDir     = dirBias[2]
+prevPredDirTxt  = prevPredDir == 1 ? "▲ UP" : prevPredDir == -1 ? "▼ DOWN" : "→ FLAT"
+prevPredDirCol  = prevPredDir == 1 ? color.new(color.green, 0) : prevPredDir == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+prevDirHit      = prevPredDir != 0 and prevPredDir == prevActDirSign
+prevDirResult   = prevPredDir == 0 ? "— (no bias)" : prevDirHit ? "✓ HIT" : "✗ MISS"
+prevDirResColor = prevPredDir == 0 ? color.new(color.gray, 30) : prevDirHit ? color.new(color.green, 20) : color.new(color.red, 20)
+
+prevPredExpH    = close[2] + atr[2] * atrMult
+prevPredExpL    = close[2] - atr[2] * atrMult
+prevRangeHit    = high[1] <= prevPredExpH and low[1] >= prevPredExpL
+prevRangeTxt    = prevRangeHit ? "✓ In-range" : "✗ Broke out"
+prevRangeColor  = prevRangeHit ? color.new(color.green, 20) : color.new(color.orange, 20)
+
+prevPredInvalid = dirBias[2] ==  1 ? loN[2] : dirBias[2] == -1 ? hiN[2] : na
+prevInvalidHit  = na(prevPredInvalid) ? false : dirBias[2] == 1 ? low[1] <= prevPredInvalid : high[1] >= prevPredInvalid
+prevInvalidTxt  = na(prevPredInvalid) ? "—" : prevInvalidHit ? "✗ Broken" : "✓ Held"
+prevInvalidCol  = na(prevPredInvalid) ? color.new(color.gray, 40) : prevInvalidHit ? color.new(color.red, 20) : color.new(color.green, 20)
+
+// --- Current candle live values vs prediction from [1] ---
+currPredDir     = dirBias[1]
+currPredDirTxt  = currPredDir == 1 ? "▲ UP" : currPredDir == -1 ? "▼ DOWN" : "→ FLAT"
+currPredDirCol  = currPredDir == 1 ? color.new(color.green, 0) : currPredDir == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+currLiveDirSign = close > close[1] ? 1 : close < close[1] ? -1 : 0
+currLiveDirTxt  = currLiveDirSign == 1 ? "▲ UP" : currLiveDirSign == -1 ? "▼ DOWN" : "→ FLAT"
+currLiveDirCol  = currLiveDirSign == 1 ? color.new(color.green, 0) : currLiveDirSign == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
+
+currPredExpH    = close[1] + atr[1] * atrMult
+currPredExpL    = close[1] - atr[1] * atrMult
+currLiveInRange = high <= currPredExpH and low >= currPredExpL
+currLiveRangeTxt= currLiveInRange ? "✓ In-range" : "✗ Broke out"
+currLiveRangeCol= currLiveInRange ? color.new(color.green, 20) : color.new(color.orange, 20)
+
+currPredInvalid = dirBias[1] ==  1 ? loN[1] : dirBias[1] == -1 ? hiN[1] : na
+currInvalidHit  = na(currPredInvalid) ? false : dirBias[1] == 1 ? low <= currPredInvalid : high >= currPredInvalid
+currInvalidTxt  = na(currPredInvalid) ? "—" : currInvalidHit ? "✗ Broken" : "✓ Holding"
+currInvalidCol  = na(currPredInvalid) ? color.new(color.gray, 40) : currInvalidHit ? color.new(color.red, 20) : color.new(color.green, 20)
+
+// --- Helpers to fetch text variants at offsets (string series auto-index) ---
+f_confTxt(int c) => na(c) ? "—" : str.tostring(c) + " / ±9"
+
+// ─────────────────────────── TABLE 1 · PREVIOUS CANDLE ──────────────────────
+var table t1 = table.new(position.top_right, 3, 14, border_width=1, frame_color=color.new(color.gray, 50), border_color=color.new(color.gray, 70))
+
+if showT1 and barstate.islast
+    table.cell(t1, 0, 0, "PREVIOUS CANDLE", bgcolor=color.new(color.blue, 20), text_color=white, text_size=tSize)
+    table.merge_cells(t1, 0, 0, 2, 0)
+
+    table.cell(t1, 0, 1, "", text_size=tSize, text_color=white, bgcolor=color.new(color.gray, 40))
+    table.cell(t1, 1, 1, "Predicted", text_size=tSize, text_color=white, bgcolor=color.new(color.blue, 50))
+    table.cell(t1, 2, 1, "Actual",    text_size=tSize, text_color=white, bgcolor=color.new(color.blue, 50))
+
+    table.cell(t1, 0, 2, "Direction",       text_size=tSize, text_color=white)
+    table.cell(t1, 1, 2, prevPredDirTxt,    text_size=tSize, bgcolor=prevPredDirCol,  text_color=white)
+    table.cell(t1, 2, 2, prevActDirTxt,     text_size=tSize, bgcolor=prevActDirColor, text_color=white)
+
+    table.cell(t1, 0, 3, "Direction result",text_size=tSize, text_color=white)
+    table.cell(t1, 1, 3, prevDirResult,     text_size=tSize, bgcolor=prevDirResColor, text_color=white)
+    table.merge_cells(t1, 1, 3, 2, 3)
+
+    table.cell(t1, 0, 4, "Expected High",   text_size=tSize, text_color=white)
+    table.cell(t1, 1, 4, f_fmt(prevPredExpH),text_size=tSize, text_color=white)
+    table.cell(t1, 2, 4, f_fmt(high[1]),    text_size=tSize, text_color=white)
+
+    table.cell(t1, 0, 5, "Expected Low",    text_size=tSize, text_color=white)
+    table.cell(t1, 1, 5, f_fmt(prevPredExpL),text_size=tSize, text_color=white)
+    table.cell(t1, 2, 5, f_fmt(low[1]),     text_size=tSize, text_color=white)
+
+    table.cell(t1, 0, 6, "Range result",    text_size=tSize, text_color=white)
+    table.cell(t1, 1, 6, prevRangeTxt,      text_size=tSize, bgcolor=prevRangeColor, text_color=white)
+    table.merge_cells(t1, 1, 6, 2, 6)
+
+    table.cell(t1, 0, 7, "Invalidation",    text_size=tSize, text_color=white)
+    table.cell(t1, 1, 7, f_fmt(prevPredInvalid), text_size=tSize, text_color=white)
+    table.cell(t1, 2, 7, prevInvalidTxt,    text_size=tSize, bgcolor=prevInvalidCol, text_color=white)
+
+    table.cell(t1, 0, 8, "Stage",           text_size=tSize, text_color=white)
+    table.cell(t1, 1, 8, stageName[2],      text_size=tSize, bgcolor=stageColor[2], text_color=white)
+    table.cell(t1, 2, 8, stageName[1],      text_size=tSize, bgcolor=stageColor[1], text_color=white)
+
+    table.cell(t1, 0, 9, "Archetype",       text_size=tSize, text_color=white)
+    table.cell(t1, 1, 9, archetypeTxt[2],   text_size=tSize, text_color=white)
+    table.cell(t1, 2, 9, archetypeTxt[1],   text_size=tSize, text_color=white)
+
+    table.cell(t1, 0, 10, "Confluence",     text_size=tSize, text_color=white)
+    table.cell(t1, 1, 10, f_confTxt(confluence[2]), text_size=tSize, bgcolor=confColor[2], text_color=white)
+    table.cell(t1, 2, 10, f_confTxt(confluence[1]), text_size=tSize, bgcolor=confColor[1], text_color=white)
+
+    table.cell(t1, 0, 11, "Ribbon",         text_size=tSize, text_color=white)
+    table.cell(t1, 1, 11, ribbonTxt[2],     text_size=tSize, text_color=white)
+    table.cell(t1, 2, 11, ribbonTxt[1],     text_size=tSize, text_color=white)
+
+    table.cell(t1, 0, 12, "Momentum",       text_size=tSize, text_color=white)
+    table.cell(t1, 1, 12, bxSignTxt[2] + " · " + bxSlopeTxt[2], text_size=tSize, text_color=white)
+    table.cell(t1, 2, 12, bxSignTxt[1] + " · " + bxSlopeTxt[1], text_size=tSize, text_color=white)
+
+    table.cell(t1, 0, 13, "Volume",         text_size=tSize, text_color=white)
+    table.cell(t1, 1, 13, volTxt[2],        text_size=tSize, text_color=white)
+    table.cell(t1, 2, 13, volTxt[1],        text_size=tSize, text_color=white)
+
+// ─────────────────────────── TABLE 2 · CURRENT CANDLE ───────────────────────
+var table t2 = table.new(position.middle_right, 3, 14, border_width=1, frame_color=color.new(color.gray, 50), border_color=color.new(color.gray, 70))
+
+if showT2 and barstate.islast
+    table.cell(t2, 0, 0, "CURRENT CANDLE", bgcolor=color.new(color.purple, 20), text_color=white, text_size=tSize)
+    table.merge_cells(t2, 0, 0, 2, 0)
+
+    table.cell(t2, 0, 1, "", text_size=tSize, text_color=white, bgcolor=color.new(color.gray, 40))
+    table.cell(t2, 1, 1, "Predicted", text_size=tSize, text_color=white, bgcolor=color.new(color.purple, 50))
+    table.cell(t2, 2, 1, "Live",      text_size=tSize, text_color=white, bgcolor=color.new(color.purple, 50))
+
+    table.cell(t2, 0, 2, "Direction",        text_size=tSize, text_color=white)
+    table.cell(t2, 1, 2, currPredDirTxt,     text_size=tSize, bgcolor=currPredDirCol, text_color=white)
+    table.cell(t2, 2, 2, currLiveDirTxt,     text_size=tSize, bgcolor=currLiveDirCol, text_color=white)
+
+    table.cell(t2, 0, 3, "Confidence",       text_size=tSize, text_color=white)
+    table.cell(t2, 1, 3, confidence[1],      text_size=tSize, text_color=white)
+    table.cell(t2, 2, 3, confidence,         text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 4, "Expected High",    text_size=tSize, text_color=white)
+    table.cell(t2, 1, 4, f_fmt(currPredExpH),text_size=tSize, text_color=white)
+    table.cell(t2, 2, 4, f_fmt(high),        text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 5, "Expected Low",     text_size=tSize, text_color=white)
+    table.cell(t2, 1, 5, f_fmt(currPredExpL),text_size=tSize, text_color=white)
+    table.cell(t2, 2, 5, f_fmt(low),         text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 6, "Range status",     text_size=tSize, text_color=white)
+    table.cell(t2, 1, 6, currLiveRangeTxt,   text_size=tSize, bgcolor=currLiveRangeCol, text_color=white)
+    table.merge_cells(t2, 1, 6, 2, 6)
+
+    table.cell(t2, 0, 7, "Invalidation",     text_size=tSize, text_color=white)
+    table.cell(t2, 1, 7, f_fmt(currPredInvalid), text_size=tSize, text_color=white)
+    table.cell(t2, 2, 7, currInvalidTxt,     text_size=tSize, bgcolor=currInvalidCol, text_color=white)
+
+    table.cell(t2, 0, 8, "Stage",            text_size=tSize, text_color=white)
+    table.cell(t2, 1, 8, stageName[1],       text_size=tSize, bgcolor=stageColor[1], text_color=white)
+    table.cell(t2, 2, 8, stageName,          text_size=tSize, bgcolor=stageColor,    text_color=white)
+
+    table.cell(t2, 0, 9, "Archetype",        text_size=tSize, text_color=white)
+    table.cell(t2, 1, 9, archetypeTxt[1],    text_size=tSize, text_color=white)
+    table.cell(t2, 2, 9, archetypeTxt,       text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 10, "Confluence",      text_size=tSize, text_color=white)
+    table.cell(t2, 1, 10, f_confTxt(confluence[1]), text_size=tSize, bgcolor=confColor[1], text_color=white)
+    table.cell(t2, 2, 10, f_confTxt(confluence),    text_size=tSize, bgcolor=confColor,    text_color=white)
+
+    table.cell(t2, 0, 11, "Ribbon",          text_size=tSize, text_color=white)
+    table.cell(t2, 1, 11, ribbonTxt[1],      text_size=tSize, text_color=white)
+    table.cell(t2, 2, 11, ribbonTxt,         text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 12, "Momentum",        text_size=tSize, text_color=white)
+    table.cell(t2, 1, 12, bxSignTxt[1] + " · " + bxSlopeTxt[1], text_size=tSize, text_color=white)
+    table.cell(t2, 2, 12, bxSignTxt + " · " + bxSlopeTxt,       text_size=tSize, text_color=white)
+
+    table.cell(t2, 0, 13, "Volume",          text_size=tSize, text_color=white)
+    table.cell(t2, 1, 13, volTxt[1],         text_size=tSize, text_color=white)
+    table.cell(t2, 2, 13, volTxt,            text_size=tSize, text_color=white)
+
+// ─────────────────────────── TABLE 3 · NEXT CANDLE ──────────────────────────
+// Prediction only (no actual yet). Second column explains the basis.
+
+nextInvalid = dirBias == 1 ? loN : dirBias == -1 ? hiN : na
+nextOneLiner = dirBias == 1 ? ("Long above " + f_fmt(ribbonUp) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expHigh)) : dirBias == -1 ? ("Short below " + f_fmt(ribbonDn) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expLow)) : "Stand aside — wait for confluence ≥ ±3"
+
+var table t3 = table.new(position.bottom_right, 3, 12, border_width=1, frame_color=color.new(color.gray, 50), border_color=color.new(color.gray, 70))
+
+if showT3 and barstate.islast
+    table.cell(t3, 0, 0, "NEXT CANDLE · PROBABILISTIC", bgcolor=color.new(color.orange, 20), text_color=white, text_size=tSize)
+    table.merge_cells(t3, 0, 0, 2, 0)
+
+    table.cell(t3, 0, 1, "", text_size=tSize, text_color=white, bgcolor=color.new(color.gray, 40))
+    table.cell(t3, 1, 1, "Prediction", text_size=tSize, text_color=white, bgcolor=color.new(color.orange, 50))
+    table.cell(t3, 2, 1, "Basis",      text_size=tSize, text_color=white, bgcolor=color.new(color.orange, 50))
+
+    table.cell(t3, 0, 2, "Direction",    text_size=tSize, text_color=white)
+    table.cell(t3, 1, 2, arrow + "  " + dirTxt, text_size=tSize, bgcolor=dirColor, text_color=white)
+    table.cell(t3, 2, 2, "Confluence " + str.tostring(confluence) + " vs ±3 threshold", text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 3, "Confidence",   text_size=tSize, text_color=white)
+    table.cell(t3, 1, 3, confidence,     text_size=tSize, text_color=white)
+    table.cell(t3, 2, 3, "|Confluence| = " + str.tostring(math.abs(confluence)), text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 4, "Expected High",text_size=tSize, text_color=white)
+    table.cell(t3, 1, 4, f_fmt(expHigh), text_size=tSize, text_color=white)
+    table.cell(t3, 2, 4, "Close + ATR × " + str.tostring(atrMult, "#.##"), text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 5, "Expected Low", text_size=tSize, text_color=white)
+    table.cell(t3, 1, 5, f_fmt(expLow),  text_size=tSize, text_color=white)
+    table.cell(t3, 2, 5, "Close − ATR × " + str.tostring(atrMult, "#.##"), text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 6, "Invalidation", text_size=tSize, text_color=white)
+    table.cell(t3, 1, 6, f_fmt(nextInvalid), text_size=tSize, text_color=white)
+    table.cell(t3, 2, 6, dirBias == 1 ? "Swing low (" + str.tostring(swingN) + "b)" : dirBias == -1 ? "Swing high (" + str.tostring(swingN) + "b)" : "—", text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 7, "Stage",        text_size=tSize, text_color=white)
+    table.cell(t3, 1, 7, stageName,      text_size=tSize, bgcolor=stageColor, text_color=white)
+    table.cell(t3, 2, 7, "From ribbon color + slope + price position", text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 8, "Setup",        text_size=tSize, text_color=white)
+    table.cell(t3, 1, 8, archetypeTxt,   text_size=tSize, text_color=white)
+    table.cell(t3, 2, 8, "A/B/C/D/E archetype", text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 9, "Ribbon",       text_size=tSize, text_color=white)
+    table.cell(t3, 1, 9, ribbonTxt,      text_size=tSize, text_color=white)
+    table.cell(t3, 2, 9, "Trend filter",  text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 10, "Momentum",    text_size=tSize, text_color=white)
+    table.cell(t3, 1, 10, bxSignTxt + " · " + bxSlopeTxt, text_size=tSize, text_color=white)
+    table.cell(t3, 2, 10, "B-Xtrender sign & slope", text_size=tSize, text_color=white)
+
+    table.cell(t3, 0, 11, "One-liner",   text_size=tSize, text_color=white)
+    table.cell(t3, 1, 11, nextOneLiner,  text_size=tSize, text_color=white)
+    table.merge_cells(t3, 1, 11, 2, 11)
+
+// ─────────────────────────── HISTORY EXPORT (Pine Logs → CSV) ──────────────
+// One row per closed bar. Prediction was made at close of [1]; evaluated against this bar.
+if logOn and barstate.isconfirmed
+    if logHdr and barstate.isfirst
+        log.info("time,pred_dir,act_dir,dir_hit,pred_high,act_high,pred_low,act_low,range_hit,pred_invalid,invalid_broken,confluence,stage,archetype,bxraw,ribbon_score,struct_score,vol_score")
+
+    _predDir     = dirBias[1]
+    _actDir      = close > close[1] ? 1 : close < close[1] ? -1 : 0
+    _predH       = close[1] + atr[1] * atrMult
+    _predL       = close[1] - atr[1] * atrMult
+    _dirHit      = _predDir != 0 and _predDir == _actDir ? 1 : 0
+    _rangeHit    = high <= _predH and low >= _predL ? 1 : 0
+    _predInv     = _predDir == 1 ? loN[1] : _predDir == -1 ? hiN[1] : na
+    _invBroken   = na(_predInv) ? 0 : _predDir == 1 ? (low <= _predInv ? 1 : 0) : (high >= _predInv ? 1 : 0)
+
+    log.info(str.format(
+      "{0},{1},{2},{3},{4,number,#.#####},{5,number,#.#####},{6,number,#.#####},{7,number,#.#####},{8},{9,number,#.#####},{10},{11},{12},{13},{14,number,#.##},{15},{16},{17}",
+      str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone),
+      _predDir, _actDir, _dirHit,
+      _predH, high, _predL, low, _rangeHit,
+      _predInv, _invBroken,
+      confluence[1], stage[1], archetypeId[1], bxRaw[1],
+      ribbonScore[1], structScore[1], volScore[1]))
+
+// ─────────────────────────── ALERTS ─────────────────────────────────────────
+alertcondition(ta.crossover(confluence, 3),   "Bullish confluence turn",  "7XP: Confluence crossed above +3")
+alertcondition(ta.crossunder(confluence, -3), "Bearish confluence turn",  "7XP: Confluence crossed below −3")
+alertcondition(isBreakout, "Stage 1→2 breakout",        "7XP: Stage 1→2 breakout detected")
+alertcondition(isRollover, "Stage 3 rollover",          "7XP: Distribution / rollover detected")
+alertcondition(isExhaust,  "Overextension",             "7XP: Overextension / potential exhaustion")
