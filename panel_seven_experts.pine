@@ -13,7 +13,7 @@ indicator("Seven Experts — Confluence Panel", shorttitle="7XP", overlay=true, 
 // ─────────────────────────── INPUTS ─────────────────────────────────────────
 grpR  = "Market Bias Ribbon"
 haLen   = input.int(100, "HA smoothing length",     minval=2, group=grpR)
-haLen2  = input.int(100, "Ribbon smoothing length", minval=2, group=grpR)
+haLen2  = input.int(1,   "Ribbon smoothing length", minval=1, group=grpR, tooltip="Second-pass EMA over the HA series. Default 1 = pass-through (recommended). Raising this double-smooths and makes the signal sticky across all timeframes.")
 oscLen  = input.int(7,   "Oscillator length",       minval=1, group=grpR)
 
 grpB  = "B-Xtrender Momentum"
@@ -23,11 +23,16 @@ bxRsi   = input.int(15,  "RSI length",  minval=1, group=grpB)
 bxSig   = input.int(5,   "Signal EMA",  minval=1, group=grpB)
 
 grpS  = "Structure & Range"
-swingN  = input.int(20,  "Swing lookback (bars)",     minval=5, group=grpS)
-atrLen  = input.int(14,  "ATR length",                minval=1, group=grpS)
-atrMult = input.float(1.0, "Expected-range ATR×",     step=0.1, group=grpS)
-extK    = input.float(2.0, "Overextension ATR×",      step=0.1, group=grpS)
-tolATR  = input.float(0.5, "Archetype tolerance ATR×", step=0.1, group=grpS)
+swingN    = input.int(20,  "Swing lookback (bars)",     minval=5, group=grpS)
+atrLen    = input.int(14,  "ATR length",                minval=1, group=grpS)
+atrMult   = input.float(1.0, "Expected-range ATR× (manual)", step=0.1, group=grpS)
+adaptBand = input.bool(true, "Adaptive ATR band", group=grpS, tooltip="Auto-scales band width to capture ~70% of recent bars. Overrides the manual ATR× above. Works on any timeframe.")
+extK      = input.float(2.0, "Overextension ATR×",      step=0.1, group=grpS)
+tolATR    = input.float(0.5, "Archetype tolerance ATR×", step=0.1, group=grpS)
+
+grpC  = "Confluence"
+adaptConf = input.bool(true, "Adaptive confluence threshold", group=grpC, tooltip="Use the 70th percentile of recent |confluence| as the directional bias threshold, instead of a fixed number. Self-tunes to any timeframe and instrument.")
+pctLen    = input.int(200, "Adaptive lookback (bars)", minval=50, group=grpC)
 
 grpUI = "UI"
 showT1  = input.bool(true, "Show Previous-Candle table", group=grpUI)
@@ -69,6 +74,10 @@ strongBear = not bullBias and oscBias <= oscSmooth
 atr        = ta.atr(atrLen)
 ribbonFlat = (ribbonUp - ribbonDn) < atr * 0.4
 
+// Adaptive ATR multiplier — targets ~70% bar-range coverage (band is half-width each side)
+adaptK  = nz(ta.percentile_linear_interpolation((high - low) / math.max(atr, 0.0000001), pctLen, 70) / 2.0, atrMult)
+effMult = adaptBand ? adaptK : atrMult
+
 ribbonColor = strongBull ? color.new(color.green, 60) : bullBias ? color.new(color.green, 80) : strongBear ? color.new(color.red, 60) : color.new(color.red, 80)
 
 plot(ribbonUp, "Ribbon Up", color=ribbonColor, linewidth=2)
@@ -96,13 +105,26 @@ volExpand = volume > volSma * 1.25
 bullBar   = close > open
 volScore  = volExpand ? (bullBar ? 1 : -1) : 0
 
-// ─────────────────────────── CONFLUENCE SCORE  (−9 … +9) ────────────────────
-ribbonScore = strongBull ? 2 : bullBias ? 1 : strongBear ? -2 : ribbonFlat ? 0 : -1
+// ─────────────────────────── CONFLUENCE SCORE  (−4 … +4) ────────────────────
+// Components kept (uncorrelated axes): ribbonScore, bxSlope, structScore.
+// Dropped from the sum (kept for display only):
+//   · priceVsRibbon — redundant with ribbonScore
+//   · bxSign        — redundant with bxSlope
+//   · volScore      — 40k-bar sample showed it adds no edge (aligned 46.9% vs against 50.5%)
+ribbonScore   = strongBull ? 2 : bullBias ? 1 : strongBear ? -2 : ribbonFlat ? 0 : -1
 priceVsRibbon = close > ribbonUp ? 1 : close < ribbonDn ? -1 : 0
-bxSign  = bxRaw > 0 ? 1 : bxRaw < 0 ? -1 : 0
-bxSlope = bxRaw > bxRaw[1] and bxRaw > bxSigL ? 1 : bxRaw < bxRaw[1] and bxRaw < bxSigL ? -1 : 0
+bxSign        = bxRaw > 0 ? 1 : bxRaw < 0 ? -1 : 0
+bxSlope       = bxRaw > bxRaw[1] and bxRaw > bxSigL ? 1 : bxRaw < bxRaw[1] and bxRaw < bxSigL ? -1 : 0
 
-confluence = ribbonScore + priceVsRibbon + bxSign + bxSlope + structScore + volScore
+confluence  = ribbonScore + bxSlope + structScore
+maxConf     = 4   // |ribbonScore|max 2 + |bxSlope|max 1 + |structScore|max 1
+confPct     = confluence * 100.0 / maxConf
+absConf     = math.abs(confluence)
+
+// Adaptive thresholds from recent |confluence| distribution — fallbacks cover the warm-up period.
+confThr   = adaptConf ? nz(ta.percentile_linear_interpolation(math.abs(confluence), pctLen, 70), 2.0) : 2.0
+confHiThr = nz(ta.percentile_linear_interpolation(math.abs(confluence), pctLen, 85), 3.0)
+confMdThr = nz(ta.percentile_linear_interpolation(math.abs(confluence), pctLen, 60), 2.0)
 
 // ─────────────────────────── STAGE DETECTION ────────────────────────────────
 ribbonSlopeUp   = ribbonMid > ribbonMid[3]
@@ -119,10 +141,10 @@ stageColor = stage == 2 ? color.new(color.green, 20) : stage == 4 ? color.new(co
 pullbackZone = low <= ribbonUp + atr * tolATR or low[1] <= ribbonUp[1] + atr * tolATR
 distFromMid  = (close - ribbonMid) / atr
 
-isBreakout = ribbonJustGreen and confluence >= 3 and close > ribbonUp
-isPullback = stage == 2 and confluence >= 4 and bxRaw > bxRaw[1] and pullbackZone
-isBounce   = stage == 4 and bxRaw > bxRaw[1] and bxRaw > bxSigL and confluence >= -1
-isRollover = (stage == 3 or ribbonJustRed) and confluence <= -3
+isBreakout = ribbonJustGreen and confluence >=  confThr and close > ribbonUp
+isPullback = stage == 2 and confluence >=  confThr and bxRaw > bxRaw[1] and pullbackZone
+isBounce   = stage == 4 and bxRaw > bxRaw[1] and bxRaw > bxSigL and confluence >= -confThr * 0.5
+isRollover = (stage == 3 or ribbonJustRed) and confluence <= -confThr
 isExhaust  = math.abs(distFromMid) > extK and math.sign(distFromMid) == math.sign(bxRaw) and math.abs(bxRaw) > 40
 
 archetypeId  = isBreakout ? 1 : isPullback ? 2 : isBounce ? 3 : isRollover ? 4 : isExhaust ? 5 : 0
@@ -130,10 +152,18 @@ archetypeTxt = archetypeId == 1 ? "B · Stage 1→2 breakout" : archetypeId == 2
 archetypeBias = archetypeId == 1 ? 1 : archetypeId == 2 ? 1 : archetypeId == 3 ? 0 : archetypeId == 4 ? -1 : archetypeId == 5 ? (distFromMid > 0 ? -1 : 1) : 0
 
 // ─────────────────────────── NEXT-CANDLE BIAS ───────────────────────────────
-dirBias    = confluence >= 3 ? 1 : confluence <= -3 ? -1 : 0
-confidence = math.abs(confluence) >= 7 ? "High" : math.abs(confluence) >= 4 ? "Medium" : "Low"
-expHigh    = close + atr * atrMult
-expLow     = close - atr * atrMult
+// Gates (from 40k-bar in-sample analysis):
+//   1. Confluence strong enough         — |confluence| above adaptive threshold
+//   2. Stage must be trending           — stage 0/1/3 predictions hit only 41-44%
+//   3. Ribbon must align with direction — counter-ribbon signals hit only 40-45%
+dirRaw   = confluence >=  confThr ? 1 : confluence <= -confThr ? -1 : 0
+stageOK  = stage == 2 or stage == 4
+ribbonOK = math.sign(ribbonScore) == dirRaw
+dirBias  = dirRaw != 0 and stageOK and ribbonOK ? dirRaw : 0
+
+confidence = absConf >= confHiThr ? "High" : absConf >= confMdThr ? "Medium" : "Low"
+expHigh    = close + atr * effMult
+expLow     = close - atr * effMult
 invalid    = dirBias == 1 ? loN : dirBias == -1 ? hiN : na
 verdictTxt = dirBias == 1 ? "LONG bias · buy dips above invalidation" : dirBias == -1 ? "SHORT bias · sell rallies below invalidation" : "NEUTRAL · stand aside"
 arrow      = dirBias == 1 ? "▲" : dirBias == -1 ? "▼" : "→"
@@ -149,7 +179,7 @@ ribbonTxt  = strongBull ? "Green · strong" : bullBias ? "Green · soft" : stron
 priceVsTxt = priceVsRibbon == 1 ? "Above" : priceVsRibbon == -1 ? "Below" : "Inside"
 dirTxt     = dirBias == 1 ? "UP" : dirBias == -1 ? "DOWN" : "SIDEWAYS"
 
-confColor = confluence >= 5 ? color.new(color.green, 0) : confluence >= 2 ? color.new(color.green, 40) : confluence <= -5 ? color.new(color.red, 0) : confluence <= -2 ? color.new(color.red, 40) : color.new(color.gray, 30)
+confColor = confluence >=  confHiThr ? color.new(color.green, 0) : confluence >=  confMdThr ? color.new(color.green, 40) : confluence <= -confHiThr ? color.new(color.red, 0) : confluence <= -confMdThr ? color.new(color.red, 40) : color.new(color.gray, 30)
 dirColor  = dirBias == 1 ? color.new(color.green, 0) : dirBias == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
 
 tSize = txtSize == "tiny" ? size.tiny : txtSize == "small" ? size.small : txtSize == "large" ? size.large : size.normal
@@ -173,8 +203,8 @@ prevDirHit      = prevPredDir != 0 and prevPredDir == prevActDirSign
 prevDirResult   = prevPredDir == 0 ? "— (no bias)" : prevDirHit ? "✓ HIT" : "✗ MISS"
 prevDirResColor = prevPredDir == 0 ? color.new(color.gray, 30) : prevDirHit ? color.new(color.green, 20) : color.new(color.red, 20)
 
-prevPredExpH    = close[2] + atr[2] * atrMult
-prevPredExpL    = close[2] - atr[2] * atrMult
+prevPredExpH    = close[2] + atr[2] * effMult[2]
+prevPredExpL    = close[2] - atr[2] * effMult[2]
 prevRangeHit    = high[1] <= prevPredExpH and low[1] >= prevPredExpL
 prevRangeTxt    = prevRangeHit ? "✓ In-range" : "✗ Broke out"
 prevRangeColor  = prevRangeHit ? color.new(color.green, 20) : color.new(color.orange, 20)
@@ -193,8 +223,8 @@ currLiveDirSign = close > close[1] ? 1 : close < close[1] ? -1 : 0
 currLiveDirTxt  = currLiveDirSign == 1 ? "▲ UP" : currLiveDirSign == -1 ? "▼ DOWN" : "→ FLAT"
 currLiveDirCol  = currLiveDirSign == 1 ? color.new(color.green, 0) : currLiveDirSign == -1 ? color.new(color.red, 0) : color.new(color.gray, 20)
 
-currPredExpH    = close[1] + atr[1] * atrMult
-currPredExpL    = close[1] - atr[1] * atrMult
+currPredExpH    = close[1] + atr[1] * effMult[1]
+currPredExpL    = close[1] - atr[1] * effMult[1]
 currLiveInRange = high <= currPredExpH and low >= currPredExpL
 currLiveRangeTxt= currLiveInRange ? "✓ In-range" : "✗ Broke out"
 currLiveRangeCol= currLiveInRange ? color.new(color.green, 20) : color.new(color.orange, 20)
@@ -205,7 +235,9 @@ currInvalidTxt  = na(currPredInvalid) ? "—" : currInvalidHit ? "✗ Broken" : 
 currInvalidCol  = na(currPredInvalid) ? color.new(color.gray, 40) : currInvalidHit ? color.new(color.red, 20) : color.new(color.green, 20)
 
 // --- Helpers to fetch text variants at offsets (string series auto-index) ---
-f_confTxt(int c) => na(c) ? "—" : str.tostring(c) + " / ±9"
+// Confluence is displayed as a signed percentage of its max possible magnitude.
+// +100% = maximally bullish, 0% = neutral, −100% = maximally bearish.
+f_confTxt(int c) => na(c) ? "—" : (c > 0 ? "+" : "") + str.tostring(c * 100 / maxConf, "#") + "%"
 
 // ─────────────────────────── TABLE 1 · PREVIOUS CANDLE ──────────────────────
 var table t1 = table.new(position.top_right, 3, 14, border_width=1, frame_color=color.new(color.gray, 50), border_color=color.new(color.gray, 70))
@@ -329,7 +361,8 @@ if showT2 and barstate.islast
 // Prediction only (no actual yet). Second column explains the basis.
 
 nextInvalid = dirBias == 1 ? loN : dirBias == -1 ? hiN : na
-nextOneLiner = dirBias == 1 ? ("Long above " + f_fmt(ribbonUp) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expHigh)) : dirBias == -1 ? ("Short below " + f_fmt(ribbonDn) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expLow)) : "Stand aside — wait for confluence ≥ ±3"
+thrPctTxt = "±" + str.tostring(math.round(confThr * 100 / maxConf)) + "%"
+nextOneLiner = dirBias == 1 ? ("Long above " + f_fmt(ribbonUp) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expHigh)) : dirBias == -1 ? ("Short below " + f_fmt(ribbonDn) + ", stop " + f_fmt(nextInvalid) + ", 1st tgt " + f_fmt(expLow)) : "Stand aside — wait for confluence ≥ " + thrPctTxt + " with stage 2/4 and aligned ribbon"
 
 var table t3 = table.new(position.bottom_right, 3, 12, border_width=1, frame_color=color.new(color.gray, 50), border_color=color.new(color.gray, 70))
 
@@ -343,19 +376,19 @@ if showT3 and barstate.islast
 
     table.cell(t3, 0, 2, "Direction",    text_size=tSize, text_color=white)
     table.cell(t3, 1, 2, arrow + "  " + dirTxt, text_size=tSize, bgcolor=dirColor, text_color=white)
-    table.cell(t3, 2, 2, "Confluence " + str.tostring(confluence) + " vs ±3 threshold", text_size=tSize, text_color=white)
+    table.cell(t3, 2, 2, "Confluence " + f_confTxt(confluence) + " vs " + thrPctTxt + " threshold", text_size=tSize, text_color=white)
 
     table.cell(t3, 0, 3, "Confidence",   text_size=tSize, text_color=white)
     table.cell(t3, 1, 3, confidence,     text_size=tSize, text_color=white)
-    table.cell(t3, 2, 3, "|Confluence| = " + str.tostring(math.abs(confluence)), text_size=tSize, text_color=white)
+    table.cell(t3, 2, 3, "|Confluence| = " + f_confTxt(math.abs(confluence)), text_size=tSize, text_color=white)
 
     table.cell(t3, 0, 4, "Expected High",text_size=tSize, text_color=white)
     table.cell(t3, 1, 4, f_fmt(expHigh), text_size=tSize, text_color=white)
-    table.cell(t3, 2, 4, "Close + ATR × " + str.tostring(atrMult, "#.##"), text_size=tSize, text_color=white)
+    table.cell(t3, 2, 4, "Close + ATR × " + str.tostring(effMult, "#.##") + (adaptBand ? " (adaptive)" : ""), text_size=tSize, text_color=white)
 
     table.cell(t3, 0, 5, "Expected Low", text_size=tSize, text_color=white)
     table.cell(t3, 1, 5, f_fmt(expLow),  text_size=tSize, text_color=white)
-    table.cell(t3, 2, 5, "Close − ATR × " + str.tostring(atrMult, "#.##"), text_size=tSize, text_color=white)
+    table.cell(t3, 2, 5, "Close − ATR × " + str.tostring(effMult, "#.##") + (adaptBand ? " (adaptive)" : ""), text_size=tSize, text_color=white)
 
     table.cell(t3, 0, 6, "Invalidation", text_size=tSize, text_color=white)
     table.cell(t3, 1, 6, f_fmt(nextInvalid), text_size=tSize, text_color=white)
@@ -385,29 +418,31 @@ if showT3 and barstate.islast
 // One row per closed bar. Prediction was made at close of [1]; evaluated against this bar.
 if logOn and barstate.isconfirmed
     if logHdr and barstate.isfirst
-        log.info("time,pred_dir,act_dir,dir_hit,pred_high,act_high,pred_low,act_low,range_hit,pred_invalid,invalid_broken,confluence,stage,archetype,bxraw,ribbon_score,struct_score,vol_score")
+        log.info("time,pred_dir,act_dir,dir_hit,pred_high,act_high,pred_low,act_low,range_hit,pred_invalid,invalid_broken,confluence,conf_pct,conf_thr,eff_mult,stage,archetype,bxraw,ribbon_score,struct_score,vol_score")
 
     _predDir     = dirBias[1]
     _actDir      = close > close[1] ? 1 : close < close[1] ? -1 : 0
-    _predH       = close[1] + atr[1] * atrMult
-    _predL       = close[1] - atr[1] * atrMult
+    _predH       = close[1] + atr[1] * effMult[1]
+    _predL       = close[1] - atr[1] * effMult[1]
     _dirHit      = _predDir != 0 and _predDir == _actDir ? 1 : 0
     _rangeHit    = high <= _predH and low >= _predL ? 1 : 0
     _predInv     = _predDir == 1 ? loN[1] : _predDir == -1 ? hiN[1] : na
     _invBroken   = na(_predInv) ? 0 : _predDir == 1 ? (low <= _predInv ? 1 : 0) : (high >= _predInv ? 1 : 0)
+    _confPct     = math.round(confluence[1] * 100.0 / maxConf)
 
     log.info(str.format(
-      "{0},{1},{2},{3},{4,number,#.#####},{5,number,#.#####},{6,number,#.#####},{7,number,#.#####},{8},{9,number,#.#####},{10},{11},{12},{13},{14,number,#.##},{15},{16},{17}",
+      "{0},{1},{2},{3},{4,number,#.#####},{5,number,#.#####},{6,number,#.#####},{7,number,#.#####},{8},{9,number,#.#####},{10},{11},{12},{13,number,#.##},{14,number,#.###},{15},{16},{17,number,#.##},{18},{19},{20}",
       str.format_time(time, "yyyy-MM-dd HH:mm", syminfo.timezone),
       _predDir, _actDir, _dirHit,
       _predH, high, _predL, low, _rangeHit,
       _predInv, _invBroken,
-      confluence[1], stage[1], archetypeId[1], bxRaw[1],
+      confluence[1], _confPct, confThr[1], effMult[1],
+      stage[1], archetypeId[1], bxRaw[1],
       ribbonScore[1], structScore[1], volScore[1]))
 
 // ─────────────────────────── ALERTS ─────────────────────────────────────────
-alertcondition(ta.crossover(confluence, 3),   "Bullish confluence turn",  "7XP: Confluence crossed above +3")
-alertcondition(ta.crossunder(confluence, -3), "Bearish confluence turn",  "7XP: Confluence crossed below −3")
+alertcondition(ta.crossover(confluence,  confThr), "Bullish confluence turn",  "7XP: Confluence crossed above adaptive threshold")
+alertcondition(ta.crossunder(confluence, -confThr), "Bearish confluence turn", "7XP: Confluence crossed below adaptive threshold")
 alertcondition(isBreakout, "Stage 1→2 breakout",        "7XP: Stage 1→2 breakout detected")
 alertcondition(isRollover, "Stage 3 rollover",          "7XP: Distribution / rollover detected")
 alertcondition(isExhaust,  "Overextension",             "7XP: Overextension / potential exhaustion")
