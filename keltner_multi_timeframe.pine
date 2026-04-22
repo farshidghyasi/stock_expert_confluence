@@ -52,9 +52,10 @@ f_keltner(simple string tf) =>
     rng = mult * ta.atr(atrLen)
     up  = mid + rng
     lo  = mid - rng
-    [u, m, l] = nonRep
-         ? request.security(syminfo.tickerid, tf, [up[1], mid[1], lo[1]], lookahead = barmerge.lookahead_on)
-         : request.security(syminfo.tickerid, tf, [up,    mid,    lo   ], lookahead = barmerge.lookahead_off)
+    [u, m, l] = if nonRep
+        request.security(syminfo.tickerid, tf, [up[1], mid[1], lo[1]], lookahead = barmerge.lookahead_on)
+    else
+        request.security(syminfo.tickerid, tf, [up,    mid,    lo   ], lookahead = barmerge.lookahead_off)
     [u, m, l]
 
 [u4H, _m4H, l4H] = f_keltner(tf4H)
