@@ -1,0 +1,82 @@
+// @version=6
+// ============================================================================
+// Keltner Multi-Timeframe Bands
+//   4H         · Blue
+//   Daily      · Gold
+//   Weekly     · Purple
+//   Monthly    · Orange
+//   Quarterly  · Light purple
+// Each timeframe renders an upper and lower Keltner band on the current chart.
+// Middle line is an EMA; band offset is ATR × multiplier.
+// ============================================================================
+
+indicator("Keltner Multi-Timeframe Bands", shorttitle="KC-MTF", overlay=true)
+
+// ─────────────────────────── INPUTS ─────────────────────────────────────────
+grpK   = "Keltner Settings"
+emaLen  = input.int(20, "EMA length",  minval=1, group=grpK)
+atrLen  = input.int(10, "ATR length",  minval=1, group=grpK)
+mult    = input.float(2.0, "ATR multiplier", step=0.1, minval=0.1, group=grpK)
+nonRep  = input.bool(true, "Non-repainting (use last closed HTF bar)", group=grpK,
+     tooltip="On: pulls the previous closed higher-timeframe value (bands step at HTF close). Off: uses the in-progress HTF value (bands update intra-HTF, repainting until the HTF bar closes).")
+
+grpT   = "Timeframes"
+show4H  = input.bool(true, "Show 4H",        group=grpT)
+showD   = input.bool(true, "Show Daily",     group=grpT)
+showW   = input.bool(true, "Show Weekly",    group=grpT)
+showM   = input.bool(true, "Show Monthly",   group=grpT)
+showQ   = input.bool(true, "Show Quarterly", group=grpT)
+
+tf4H    = input.timeframe("240", "4H timeframe",        group=grpT)
+tfD     = input.timeframe("D",   "Daily timeframe",     group=grpT)
+tfW     = input.timeframe("W",   "Weekly timeframe",    group=grpT)
+tfM     = input.timeframe("M",   "Monthly timeframe",   group=grpT)
+tfQ     = input.timeframe("3M",  "Quarterly timeframe", group=grpT)
+
+grpC   = "Colors"
+col4H   = input.color(color.new(#2196F3, 0),  "4H",        group=grpC)
+colD    = input.color(color.new(#FFD700, 0),  "Daily",     group=grpC)
+colW    = input.color(color.new(#8E24AA, 0),  "Weekly",    group=grpC)
+colM    = input.color(color.new(#FB8C00, 0),  "Monthly",   group=grpC)
+colQ    = input.color(color.new(#D8BFD8, 0),  "Quarterly", group=grpC)
+
+grpS   = "Style"
+lineW   = input.int(2, "Line width", minval=1, maxval=5, group=grpS)
+fillOn  = input.bool(false, "Fill between upper/lower", group=grpS)
+fillOp  = input.int(92, "Fill transparency", minval=0, maxval=100, group=grpS)
+
+// ─────────────────────────── HTF FETCH ──────────────────────────────────────
+// Keltner components computed on the HTF; we request upper / mid / lower in one call.
+f_keltner(simple string tf) =>
+    mid = ta.ema(close, emaLen)
+    rng = mult * ta.atr(atrLen)
+    up  = mid + rng
+    lo  = mid - rng
+    [u, m, l] = nonRep
+         ? request.security(syminfo.tickerid, tf, [up[1], mid[1], lo[1]], lookahead = barmerge.lookahead_on)
+         : request.security(syminfo.tickerid, tf, [up,    mid,    lo   ], lookahead = barmerge.lookahead_off)
+    [u, m, l]
+
+[u4H, _m4H, l4H] = f_keltner(tf4H)
+[uD,  _mD,  lD ] = f_keltner(tfD)
+[uW,  _mW,  lW ] = f_keltner(tfW)
+[uM,  _mM,  lM ] = f_keltner(tfM)
+[uQ,  _mQ,  lQ ] = f_keltner(tfQ)
+
+// ─────────────────────────── PLOTS ──────────────────────────────────────────
+p_u4H = plot(show4H ? u4H : na, title="4H Upper",        color=col4H, linewidth=lineW)
+p_l4H = plot(show4H ? l4H : na, title="4H Lower",        color=col4H, linewidth=lineW)
+p_uD  = plot(showD  ? uD  : na, title="Daily Upper",     color=colD,  linewidth=lineW)
+p_lD  = plot(showD  ? lD  : na, title="Daily Lower",     color=colD,  linewidth=lineW)
+p_uW  = plot(showW  ? uW  : na, title="Weekly Upper",    color=colW,  linewidth=lineW)
+p_lW  = plot(showW  ? lW  : na, title="Weekly Lower",    color=colW,  linewidth=lineW)
+p_uM  = plot(showM  ? uM  : na, title="Monthly Upper",   color=colM,  linewidth=lineW)
+p_lM  = plot(showM  ? lM  : na, title="Monthly Lower",   color=colM,  linewidth=lineW)
+p_uQ  = plot(showQ  ? uQ  : na, title="Quarterly Upper", color=colQ,  linewidth=lineW)
+p_lQ  = plot(showQ  ? lQ  : na, title="Quarterly Lower", color=colQ,  linewidth=lineW)
+
+fill(p_u4H, p_l4H, color = fillOn ? color.new(col4H, fillOp) : na, title="4H Fill")
+fill(p_uD,  p_lD,  color = fillOn ? color.new(colD,  fillOp) : na, title="Daily Fill")
+fill(p_uW,  p_lW,  color = fillOn ? color.new(colW,  fillOp) : na, title="Weekly Fill")
+fill(p_uM,  p_lM,  color = fillOn ? color.new(colM,  fillOp) : na, title="Monthly Fill")
+fill(p_uQ,  p_lQ,  color = fillOn ? color.new(colQ,  fillOp) : na, title="Quarterly Fill")
