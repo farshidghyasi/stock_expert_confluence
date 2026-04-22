@@ -1,0 +1,79 @@
+// @version=6
+// ============================================================================
+// Range Bands — Multi-Period (Top / Mid / Bottom)
+// For each lookback window, the band is:
+//   Top    = highest `topSrc` over N daily bars   (default: high)
+//   Bottom = lowest  `botSrc` over N daily bars   (default: close)
+//   Mid    = (Top + Bottom) / 2
+// Windows: 5 days, 1 month (~21d), 3 months (~63d), 1 year (~252d).
+// Computed on the Daily timeframe and projected onto the current chart.
+// ============================================================================
+
+indicator("Range Bands — Multi-Period", shorttitle="RB-MTF", overlay=true)
+
+// ─────────────────────────── INPUTS ─────────────────────────────────────────
+grpR    = "Range Sources"
+topSrc  = input.source(high,  "Top source (per daily bar)",    group=grpR,
+     tooltip="Price used for the highest-point calculation of each daily bar. Default = high.")
+botSrc  = input.source(close, "Bottom source (per daily bar)", group=grpR,
+     tooltip="Price used for the lowest-point calculation of each daily bar. Default = close, per the 'high-to-close' range definition.")
+
+grpP    = "Lookback (daily bars)"
+len5D   = input.int(5,   "5D lookback",  minval=1, group=grpP)
+len1M   = input.int(21,  "1M lookback",  minval=1, group=grpP)
+len3M   = input.int(63,  "3M lookback",  minval=1, group=grpP)
+len1Y   = input.int(252, "1Y lookback",  minval=1, group=grpP)
+
+grpV    = "Visibility"
+show5D  = input.bool(true, "Show 5D",      group=grpV)
+show1M  = input.bool(true, "Show 1M",      group=grpV)
+show3M  = input.bool(true, "Show 3M",      group=grpV)
+show1Y  = input.bool(true, "Show 1Y",      group=grpV)
+showMid = input.bool(true, "Show mid lines", group=grpV)
+
+grpC    = "Colors"
+col5D   = input.color(color.new(#26C6DA, 0), "5D  (cyan)",   group=grpC)
+col1M   = input.color(color.new(#66BB6A, 0), "1M  (green)",  group=grpC)
+col3M   = input.color(color.new(#FFD54F, 0), "3M  (gold)",   group=grpC)
+col1Y   = input.color(color.new(#EF5350, 0), "1Y  (red)",    group=grpC)
+
+grpS    = "Style"
+lineW   = input.int(2, "Top/Bottom line width", minval=1, maxval=5, group=grpS)
+midW    = input.int(1, "Mid line width",        minval=1, maxval=5, group=grpS)
+fillOn  = input.bool(false, "Fill between Top and Bottom", group=grpS)
+fillOp  = input.int(92, "Fill transparency", minval=0, maxval=100, group=grpS)
+
+// ─────────────────────────── RANGE COMPUTATION ──────────────────────────────
+// Evaluated in the Daily context via request.security.
+f_range(simple int len) =>
+    hi  = ta.highest(topSrc, len)
+    lo  = ta.lowest(botSrc,  len)
+    mid = (hi + lo) / 2.0
+    [hi, mid, lo]
+
+[hi5D, mid5D, lo5D] = request.security(syminfo.tickerid, "D", f_range(len5D), lookahead = barmerge.lookahead_off)
+[hi1M, mid1M, lo1M] = request.security(syminfo.tickerid, "D", f_range(len1M), lookahead = barmerge.lookahead_off)
+[hi3M, mid3M, lo3M] = request.security(syminfo.tickerid, "D", f_range(len3M), lookahead = barmerge.lookahead_off)
+[hi1Y, mid1Y, lo1Y] = request.security(syminfo.tickerid, "D", f_range(len1Y), lookahead = barmerge.lookahead_off)
+
+// ─────────────────────────── PLOTS ──────────────────────────────────────────
+p_t5D = plot(show5D ? hi5D : na, "5D Top",    color=col5D, linewidth=lineW)
+p_b5D = plot(show5D ? lo5D : na, "5D Bottom", color=col5D, linewidth=lineW)
+plot(show5D and showMid ? mid5D : na, "5D Mid", color=col5D, linewidth=midW, style=plot.style_circles)
+
+p_t1M = plot(show1M ? hi1M : na, "1M Top",    color=col1M, linewidth=lineW)
+p_b1M = plot(show1M ? lo1M : na, "1M Bottom", color=col1M, linewidth=lineW)
+plot(show1M and showMid ? mid1M : na, "1M Mid", color=col1M, linewidth=midW, style=plot.style_circles)
+
+p_t3M = plot(show3M ? hi3M : na, "3M Top",    color=col3M, linewidth=lineW)
+p_b3M = plot(show3M ? lo3M : na, "3M Bottom", color=col3M, linewidth=lineW)
+plot(show3M and showMid ? mid3M : na, "3M Mid", color=col3M, linewidth=midW, style=plot.style_circles)
+
+p_t1Y = plot(show1Y ? hi1Y : na, "1Y Top",    color=col1Y, linewidth=lineW)
+p_b1Y = plot(show1Y ? lo1Y : na, "1Y Bottom", color=col1Y, linewidth=lineW)
+plot(show1Y and showMid ? mid1Y : na, "1Y Mid", color=col1Y, linewidth=midW, style=plot.style_circles)
+
+fill(p_t5D, p_b5D, color = fillOn ? color.new(col5D, fillOp) : na, title="5D Fill")
+fill(p_t1M, p_b1M, color = fillOn ? color.new(col1M, fillOp) : na, title="1M Fill")
+fill(p_t3M, p_b3M, color = fillOn ? color.new(col3M, fillOp) : na, title="3M Fill")
+fill(p_t1Y, p_b1Y, color = fillOn ? color.new(col1Y, fillOp) : na, title="1Y Fill")
